@@ -1,0 +1,66 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = "file:./dev.db"
+}
+
+model User {
+  id                String   @id @default(cuid())
+  discordId         String   @unique
+  username          String?
+  balance           Decimal  @default(0)
+  depositAddress    String   @unique
+  hdWalletIndex     Int      @unique
+  encryptedMnemonic String?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  transactions      Transaction[]
+  challengerMatches Match[]  @relation("ChallengerMatches")
+  opponentMatches   Match[]  @relation("OpponentMatches")
+  wonMatches        Match[]  @relation("WonMatches")
+}
+
+model Transaction {
+  id        String   @id @default(cuid())
+  userId    String
+  type      String
+  status    String   @default("PENDING")
+  amount    Decimal
+  txHash    String?
+  metadata  String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@index([userId])
+  @@index([txHash])
+}
+
+model Match {
+  id             String   @id @default(cuid())
+  challengerId   String
+  opponentId     String?
+  stakeAmount    Decimal
+  status         String   @default("PENDING")
+  serverApiId    String?
+  winnerId       String?
+  payoutAmount   Decimal?
+  feeAmount      Decimal?
+  gameType       String   @default("cs2")
+  metadata       String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  challenger User  @relation("ChallengerMatches", fields: [challengerId], references: [id])
+  opponent   User? @relation("OpponentMatches", fields: [opponentId], references: [id])
+  winner     User? @relation("WonMatches", fields: [winnerId], references: [id])
+
+  @@index([challengerId])
+  @@index([opponentId])
+  @@index([status])
+}

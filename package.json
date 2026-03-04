@@ -1,0 +1,32 @@
+{
+  "name": "discord-arena",
+  "version": "1.0.0",
+  "description": "Automated Discord gambling/matchmaking platform with blockchain deposits and game server integration",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "nodemon src/index.js",
+    "db:generate": "prisma generate",
+    "db:push": "prisma db push",
+    "db:migrate": "prisma migrate dev",
+    "db:studio": "prisma studio",
+    "postinstall": "prisma generate"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "@prisma/client": "^5.22.0",
+    "discord.js": "^14.16.3",
+    "ethers": "^6.13.4",
+    "express": "^4.21.1",
+    "prisma": "^5.22.0",
+    "dotenv": "^16.4.5",
+    "helmet": "^8.0.0",
+    "winston": "^3.15.0",
+    "crypto": "^1.0.1"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.7"
+  }
+}

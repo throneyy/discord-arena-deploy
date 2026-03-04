@@ -3,6 +3,6 @@
   dockerfilePath = "Dockerfile"
 
 [deploy]
-  startCommand = "npx prisma db push && echo 'PRISMA_DONE' && node src/index.js 2>&1"
+  startCommand = "npx prisma db push --skip-generate && exec node src/index.js"
   restartPolicyType = "ON_FAILURE"
   restartPolicyMaxRetries = 10

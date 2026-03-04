@@ -1,10 +1,20 @@
 #!/bin/sh
-set -e
+echo "=== WRAPPER START ==="
+echo "Running Prisma db push..."
+npx prisma db push --skip-generate 2>&1
+PRISMA_EXIT=$?
+echo "Prisma exit code: $PRISMA_EXIT"
+if [ $PRISMA_EXIT -ne 0 ]; then
+  echo "Prisma failed, exiting"
+  exit 1
+fi
 
-echo "=== START SCRIPT ==="
-echo "Running prisma db push..."
-npx prisma db push
-echo "Prisma done."
+echo "=== Starting Node.js ==="
+echo "Node version: $(node --version)"
+echo "Working directory: $(pwd)"
+echo "Files: $(ls src/)"
 
-echo "Starting node app..."
-exec node src/index.js
+# Run node and capture both stdout and stderr
+node src/index.js 2>&1
+NODE_EXIT=$?
+echo "Node exit code: $NODE_EXIT"

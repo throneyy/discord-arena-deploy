@@ -2,8 +2,8 @@ FROM node:20-slim
 
 WORKDIR /app
 
-# Install dependencies
-COPY package*.json ./
+# Install dependencies (no lock file - fresh install)
+COPY package.json ./
 COPY prisma ./prisma/
 RUN npm install --omit=dev
 

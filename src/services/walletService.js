@@ -1,64 +1,70 @@
-// ─── Wallet Service ──────────────────────────────────────────────────────────
-// Derives unique Polygon deposit addresses for each user using BIP-44 HD wallet.
-// No private keys stored in the database — addresses are re-derived on demand.
+// ─── HD Wallet Service ───────────────────────────────────────────────────────
+// Derives unique deposit addresses from a single mnemonic using BIP-44 path:
+//   m/44'/60'/0'/0/{index}
+// Each user gets a deterministic address tied to their hdWalletIndex.
 
 const { ethers } = require('ethers');
-const prisma = require('../config/database');
-const config = require('../config');
-const logger = require('../utils/logger');
+const config     = require('../config');
+const prisma     = require('../config/database');
+const logger     = require('../utils/logger');
 
-/**
- * Get or create a deposit address for a Discord user.
- * Uses a BIP-44 path: m/44'/60'/0'/0/{index}
- */
-async function getOrCreateDepositAddress(discordId, username) {
-  // Check if user already exists
-  const existing = await prisma.user.findUnique({
-    where: { discordId },
-  });
-
-  if (existing) {
-    return { address: existing.depositAddress, isNew: false };
+class WalletService {
+  constructor() {
+    this.hdNode = ethers.HDNodeWallet.fromPhrase(
+      config.blockchain.hdMnemonic,
+      undefined,                        // no password
+      "m/44'/60'/0'/0"                  // BIP-44 base path for Ethereum
+    );
+    logger.info('WalletService initialised — HD node ready');
   }
 
-  // Find next available HD wallet index
-  const lastUser = await prisma.user.findFirst({
-    orderBy: { hdWalletIndex: 'desc' },
-    select: { hdWalletIndex: true },
-  });
+  /**
+   * Derive the wallet for a given index.
+   * @param {number} index
+   * @returns {{ address: string, privateKey: string }}
+   */
+  deriveWallet(index) {
+    const child = this.hdNode.deriveChild(index);
+    return {
+      address:    child.address,
+      privateKey: child.privateKey,
+    };
+  }
 
-  const nextIndex = lastUser ? lastUser.hdWalletIndex + 1 : 0;
+  /**
+   * Get (or create) a deposit address for a Discord user.
+   * Atomically claims the next available HD index.
+   * @param {string} discordId
+   * @param {string} username
+   * @returns {{ address: string, isNew: boolean }}
+   */
+  async getOrCreateDepositAddress(discordId, username) {
+    // Already registered?
+    const existing = await prisma.user.findUnique({ where: { discordId } });
+    if (existing) {
+      return { address: existing.depositAddress, isNew: false };
+    }
 
-  // Derive address from HD wallet
-  const mnemonic   = ethers.Mnemonic.fromPhrase(config.wallet.hdMnemonic);
-  const hdNode     = ethers.HDNodeWallet.fromMnemonic(mnemonic, `m/44'/60'/0'/0`);
-  const childWallet = hdNode.deriveChild(nextIndex);
-  const address    = childWallet.address;
+    // Claim the next index atomically
+    const maxResult = await prisma.user.aggregate({
+      _max: { hdWalletIndex: true },
+    });
+    const nextIndex = (maxResult._max.hdWalletIndex ?? -1) + 1;
 
-  // Create user record
-  const user = await prisma.user.create({
-    data: {
-      discordId,
-      username,
-      depositAddress: address,
-      hdWalletIndex: nextIndex,
-    },
-  });
+    const { address } = this.deriveWallet(nextIndex);
 
-  logger.info(`New user registered: ${discordId} -> ${address} (index ${nextIndex})`);
+    const user = await prisma.user.create({
+      data: {
+        discordId,
+        username,
+        depositAddress: address,
+        hdWalletIndex:  nextIndex,
+      },
+    });
 
-  return { address: user.depositAddress, isNew: true };
+    logger.info(`New user registered: ${discordId} → ${address} (index ${nextIndex})`);
+    return { address: user.depositAddress, isNew: true };
+  }
 }
 
-/**
- * Derive the private key for a deposit address (for sweeping funds).
- * Call this only when initiating a payout transaction.
- */
-function derivePrivateKey(index) {
-  const mnemonic   = ethers.Mnemonic.fromPhrase(config.wallet.hdMnemonic);
-  const hdNode     = ethers.HDNodeWallet.fromMnemonic(mnemonic, `m/44'/60'/0'/0`);
-  const childWallet = hdNode.deriveChild(index);
-  return childWallet.privateKey;
-}
-
-module.exports = { getOrCreateDepositAddress, derivePrivateKey };
+module.exports = new WalletService();

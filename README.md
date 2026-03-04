@@ -5,7 +5,7 @@ Automated Discord gambling/matchmaking platform with blockchain deposits, game s
 ## Architecture
 
 ```
-┌────────────────────────────────────────────────────────────────┐
+┌─────────────────────────────────────────────────────────────────┐
 │                        Discord Arena                            │
 ├─────────────┬──────────────┬──────────────┬────────────────────┤
 │  Discord    │  Express     │  Blockchain  │  Game Server       │
@@ -18,7 +18,7 @@ Automated Discord gambling/matchmaking platform with blockchain deposits, game s
 │  /accept    │              │    credit    │                    │
 │  /cancel    │              │              │                    │
 │  /matches   │              │              │                    │
-└─────────┬───┘──────┬───────┘──────┬───────┘────────────────────┘
+└─────────┬───┴──────┬───────┴──────┬───────┴────────────────────┘
           │          │              │
           └──────────┴──────────────┘
                      │

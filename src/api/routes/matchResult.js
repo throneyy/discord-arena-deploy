@@ -1,40 +1,37 @@
-// ─── Match Result Route ──────────────────────────────────────────────────────
-// POST /api/match-result
-// Called by the SourceMod plugin after each match ends.
-// Protected by HMAC-SHA256 signature verification.
+// ─── POST /api/match-result ───────────────────────────────────────────────────
+// Called by the SourceMod game server plugin after a match ends.
+// Body: { matchId, winnerDiscordId, timestamp }
+// Headers: X-Signature-Sha256: hmac-sha256 of raw body
 
-const express     = require('express');
-const verifyHmac  = require('../middleware/verifyHmac');
+const { Router } = require('express');
+const verifyHmac = require('../middleware/verifyHmac');
 const matchService = require('../../services/matchService');
-const logger      = require('../../utils/logger');
+const logger = require('../../utils/logger');
 
-const router = express.Router();
+const router = Router();
 
-/**
- * POST /api/match-result
- * Body: { matchId, winnerDiscordId, timestamp }
- * Headers: x-signature: <HMAC-SHA256 hex>
- */
 router.post('/match-result', verifyHmac, async (req, res) => {
-  const { matchId, winnerDiscordId } = req.body;
+  const { matchId, winnerDiscordId, timestamp } = req.body;
 
-  if (!matchId || !winnerDiscordId) {
-    return res.status(400).json({ error: 'matchId and winnerDiscordId are required' });
+  // Basic schema check
+  if (!matchId || !winnerDiscordId || !timestamp) {
+    return res.status(400).json({ error: 'Missing required fields: matchId, winnerDiscordId, timestamp' });
   }
 
-  logger.info(`Match result received: match=${matchId}, winner=${winnerDiscordId}`);
+  // Replay-protection: reject requests older than 5 minutes
+  const age = Date.now() - Number(timestamp);
+  if (age > 5 * 60 * 1000) {
+    logger.warn(`Rejected stale match-result request (age: ${age}ms)`, { matchId });
+    return res.status(400).json({ error: 'Request timestamp is too old' });
+  }
 
   try {
     const result = await matchService.processResult(matchId, winnerDiscordId);
-    return res.json({ success: true, ...result });
+    logger.info('Match result processed', result);
+    return res.json({ ok: true, ...result });
   } catch (err) {
     logger.error('Failed to process match result', { error: err.message, matchId });
-
-    const status = err.message.includes('not found') ? 404
-      : err.message.includes('not LIVE')             ? 409
-      : 500;
-
-    return res.status(status).json({ error: err.message });
+    return res.status(400).json({ error: err.message });
   }
 });
 

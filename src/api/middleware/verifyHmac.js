@@ -1,57 +1,51 @@
-// ─── HMAC Verification Middleware ────────────────────────────────────────────
-// Validates the x-signature header on incoming game server requests.
-// Prevents spoofed match results.
+// ─── HMAC-SHA256 Middleware ────────────────────────────────────────────────────
+// Verifies the X-Signature-Sha256 header on incoming game-server requests.
+// The signature is: hmac-sha256 of the raw request body, keyed with
+// GAME_SERVER_HMAC_SECRET.
 
 const crypto = require('crypto');
 const config = require('../../config');
 const logger = require('../../utils/logger');
 
-const MAX_TIMESTAMP_SKEW_MS = 5 * 60 * 1000; // 5 minutes
-
 /**
- * Expected header: x-signature: <hex HMAC-SHA256>
- * Signature covers: JSON.stringify(req.body)
+ * Express middleware — rejects requests with invalid or missing HMAC signatures.
  */
-module.exports = function verifyHmac(req, res, next) {
-  const signature = req.headers['x-signature'];
+function verifyHmac(req, res, next) {
+  const signature = req.headers['x-signature-sha256'];
 
   if (!signature) {
-    logger.warn('Missing x-signature header');
-    return res.status(401).json({ error: 'Missing signature' });
+    logger.warn('Missing X-Signature-Sha256 header', { path: req.path });
+    return res.status(401).json({ error: 'Missing signature header' });
   }
 
-  // Replay protection: require timestamp in body within 5 minutes
-  const timestamp = req.body?.timestamp;
-  if (!timestamp) {
-    return res.status(400).json({ error: 'Missing timestamp in request body' });
+  const rawBody = req.rawBody;
+  if (!rawBody) {
+    logger.warn('No raw body available for HMAC verification');
+    return res.status(400).json({ error: 'No body' });
   }
 
-  const now = Date.now();
-  const reqTime = parseInt(timestamp, 10);
-  if (isNaN(reqTime) || Math.abs(now - reqTime) > MAX_TIMESTAMP_SKEW_MS) {
-    logger.warn(`Request timestamp out of window: ${timestamp}`);
-    return res.status(401).json({ error: 'Request timestamp expired or invalid' });
-  }
-
-  // Compute expected HMAC over raw JSON body
-  const rawBody = JSON.stringify(req.body);
   const expected = crypto
     .createHmac('sha256', config.gameServer.hmacSecret)
     .update(rawBody)
     .digest('hex');
 
   // Constant-time comparison to prevent timing attacks
+  let valid = false;
   try {
-    const sigBuf = Buffer.from(signature,  'hex');
-    const expBuf = Buffer.from(expected, 'hex');
+    valid = crypto.timingSafeEqual(
+      Buffer.from(signature,        'hex'),
+      Buffer.from(expected, 'hex')
+    );
+  } catch (_) {
+    valid = false;
+  }
 
-    if (sigBuf.length !== expBuf.length || !crypto.timingSafeEqual(sigBuf, expBuf)) {
-      logger.warn('Invalid HMAC signature');
-      return res.status(401).json({ error: 'Invalid signature' });
-    }
-  } catch {
-    return res.status(401).json({ error: 'Invalid signature format' });
+  if (!valid) {
+    logger.warn('Invalid HMAC signature', { path: req.path });
+    return res.status(401).json({ error: 'Invalid signature' });
   }
 
   next();
-};
+}
+
+module.exports = verifyHmac;

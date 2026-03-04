@@ -1,107 +1,138 @@
-// ─── Blockchain Listener ─────────────────────────────────────────────────────
-// Listens for USDT (ERC-20) Transfer events on Polygon via Alchemy WebSocket.
-// When a transfer to a known deposit address is detected, credits the user.
+// ─── Blockchain Listener ────────────────────────────────────────────────────
+// Watches the USDT ERC-20 contract on Polygon via Alchemy WebSocket.
+// On each Transfer event, checks if the recipient is a known deposit
+// address and credits the user’s balance.
 
-const { ethers } = require('ethers');
-const prisma = require('../config/database');
-const config = require('../config');
-const logger = require('../utils/logger');
+const { ethers }  = require('ethers');
+const config      = require('../config');
+const prisma      = require('../config/database');
+const logger      = require('../utils/logger');
 
-const ERC20_TRANSFER_ABI = [
+// Minimal ERC-20 ABI: only Transfer event + decimals()
+const ERC20_ABI = [
   'event Transfer(address indexed from, address indexed to, uint256 value)',
+  'function decimals() view returns (uint8)',
 ];
 
-const USDT_DECIMALS = 6; // Polygon USDT uses 6 decimals
+const RECONNECT_DELAY_MS  = 5_000;
+const MAX_RECONNECT_TRIES = 10;
 
-let provider = null;
-let contract = null;
-
-async function start() {
-  if (!config.blockchain.alchemyWsUrl) {
-    logger.warn('ALCHEMY_WS_URL not set — blockchain listener disabled');
-    return;
+class BlockchainListener {
+  constructor() {
+    this.provider  = null;
+    this.contract  = null;
+    this.decimals  = 6; // USDT uses 6 decimals
+    this.running   = false;
+    this.reconnectCount = 0;
   }
 
-  provider = new ethers.WebSocketProvider(config.blockchain.alchemyWsUrl);
-  contract = new ethers.Contract(
-    config.blockchain.usdtContractAddress,
-    ERC20_TRANSFER_ABI,
-    provider
-  );
+  async start() {
+    this.running = true;
+    await this._connect();
+  }
 
-  // Listen for all Transfer events, filter by known deposit addresses
-  contract.on('Transfer', handleTransfer);
+  async stop() {
+    this.running = false;
+    if (this.provider) {
+      try { await this.provider.destroy(); } catch (_) {}
+    }
+    logger.info('BlockchainListener stopped');
+  }
 
-  provider.on('error', (err) => {
-    logger.error('WebSocket provider error', { error: err.message });
-  });
+  async _connect() {
+    logger.info('BlockchainListener: connecting to Alchemy WebSocket…');
 
-  logger.info('Blockchain listener started (Polygon USDT)');
+    try {
+      this.provider = new ethers.WebSocketProvider(config.blockchain.alchemyWsUrl);
+
+      // Fetch decimals once
+      const tempContract = new ethers.Contract(
+        config.blockchain.usdtContractAddress,
+        ERC20_ABI,
+        this.provider
+      );
+      this.decimals = await tempContract.decimals();
+      logger.info(`USDT decimals: ${this.decimals}`);
+
+      this.contract = new ethers.Contract(
+        config.blockchain.usdtContractAddress,
+        ERC20_ABI,
+        this.provider
+      );
+
+      // Listen for all Transfer events; filter by known deposit address in handler
+      this.contract.on('Transfer', this._handleTransfer.bind(this));
+
+      // Handle WebSocket drops
+      this.provider.websocket.on('close', () => {
+        logger.warn('WebSocket closed — scheduling reconnect…');
+        this._scheduleReconnect();
+      });
+
+      this.reconnectCount = 0;
+      logger.info('BlockchainListener: WebSocket connected and listening');
+    } catch (err) {
+      logger.error('BlockchainListener: connection error', { error: err.message });
+      this._scheduleReconnect();
+    }
+  }
+
+  _scheduleReconnect() {
+    if (!this.running) return;
+    if (this.reconnectCount >= MAX_RECONNECT_TRIES) {
+      logger.error('BlockchainListener: max reconnect attempts reached — giving up');
+      return;
+    }
+    this.reconnectCount++;
+    const delay = RECONNECT_DELAY_MS * this.reconnectCount;
+    logger.info(`BlockchainListener: reconnecting in ${delay / 1000}s (attempt ${this.reconnectCount})`);
+    setTimeout(() => this._connect(), delay);
+  }
+
+  async _handleTransfer(from, to, value, event) {
+    const toAddr = to.toLowerCase();
+
+    // Look up whether this address is a known deposit address
+    const user = await prisma.user.findFirst({
+      where: { depositAddress: { equals: toAddr, mode: 'insensitive' } },
+    });
+
+    if (!user) return; // Not our address
+
+    const amount = parseFloat(ethers.formatUnits(value, this.decimals));
+    const txHash = event.log?.transactionHash ?? 'unknown';
+
+    logger.info(`Deposit detected: ${amount} USDT → ${toAddr} (user ${user.discordId}, tx ${txHash})`);
+
+    // Check for duplicate tx
+    const duplicate = await prisma.transaction.findFirst({
+      where: { txHash },
+    });
+    if (duplicate) {
+      logger.warn(`Duplicate tx ignored: ${txHash}`);
+      return;
+    }
+
+    // Credit atomically
+    await prisma.$transaction([
+      prisma.user.update({
+        where: { id: user.id },
+        data:  { balance: { increment: amount } },
+      }),
+      prisma.transaction.create({
+        data: {
+          userId: user.id,
+          type:   'DEPOSIT',
+          status: 'COMPLETED',
+          amount,
+          txHash,
+          metadata: { from, to, raw: value.toString() },
+        },
+      }),
+    ]);
+
+    logger.info(`Credited $${amount} USDT to user ${user.discordId}`);
+  }
 }
 
-async function stop() {
-  if (contract) {
-    contract.off('Transfer', handleTransfer);
-  }
-  if (provider) {
-    await provider.destroy();
-  }
-  logger.info('Blockchain listener stopped');
-}
-
-async function handleTransfer(from, to, value, event) {
-  const toAddress = to.toLowerCase();
-
-  // Look up user by deposit address (case-insensitive)
-  const user = await prisma.user.findFirst({
-    where: {
-      depositAddress: {
-        equals: toAddress,
-        mode: 'insensitive',
-      },
-    },
-  });
-
-  if (!user) return; // Not our address
-
-  const amount = parseFloat(ethers.formatUnits(value, USDT_DECIMALS));
-  const txHash = event.log?.transactionHash || event.transactionHash;
-
-  logger.info(`Deposit detected: ${amount} USDT to ${toAddress} (user ${user.discordId})`, {
-    txHash,
-    from,
-    to,
-    amount,
-  });
-
-  // Idempotency: skip if we've already processed this tx
-  const existing = await prisma.transaction.findFirst({
-    where: { txHash },
-  });
-  if (existing) {
-    logger.warn(`Duplicate deposit tx ignored: ${txHash}`);
-    return;
-  }
-
-  // Credit user balance and record transaction atomically
-  await prisma.$transaction([
-    prisma.user.update({
-      where: { id: user.id },
-      data: { balance: { increment: amount } },
-    }),
-    prisma.transaction.create({
-      data: {
-        userId: user.id,
-        type: 'DEPOSIT',
-        status: 'COMPLETED',
-        amount,
-        txHash,
-        metadata: { from, to, rawValue: value.toString() },
-      },
-    }),
-  ]);
-
-  logger.info(`Credited ${amount} USDT to user ${user.discordId}`);
-}
-
-module.exports = { start, stop };
+module.exports = new BlockchainListener();

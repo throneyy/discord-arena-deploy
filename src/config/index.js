@@ -1,12 +1,12 @@
-// ─── Config ──────────────────────────────────────────────────────────────────
-// Reads environment variables and exposes them as a typed config object.
-// Throws early if required vars are missing.
+// ─── Config ───────────────────────────────────────────────────────────────────
+// Centralised environment variable loader.
+// Throws early with a clear error if any required var is missing.
 
 require('dotenv').config();
 
-function required(name) {
-  const val = process.env[name];
-  if (!val) throw new Error(`Missing required environment variable: ${name}`);
+function required(key) {
+  const val = process.env[key];
+  if (!val) throw new Error(`Missing required environment variable: ${key}`);
   return val;
 }
 
@@ -14,28 +14,20 @@ module.exports = {
   discord: {
     token:    required('DISCORD_TOKEN'),
     clientId: required('DISCORD_CLIENT_ID'),
-    guildId:  process.env.DISCORD_GUILD_ID || null,
-  },
-  database: {
-    url: required('DATABASE_URL'),
+    guildId:  process.env.DISCORD_GUILD_ID || null,   // optional
   },
   blockchain: {
-    alchemyWsUrl:         process.env.ALCHEMY_WS_URL || null,
+    alchemyWsUrl:         required('ALCHEMY_WS_URL'),
     alchemyHttpUrl:       process.env.ALCHEMY_HTTP_URL || null,
-    usdtContractAddress:  process.env.USDT_CONTRACT_ADDRESS || '0xc2132D05D31c914a87C6611C10748AEb04B58e8F',
-  },
-  wallet: {
-    hdMnemonic: required('HD_WALLET_MNEMONIC'),
+    hdMnemonic:           required('HD_WALLET_MNEMONIC'),
+    usdtContractAddress:  required('USDT_CONTRACT_ADDRESS'),
   },
   gameServer: {
-    hmacSecret:     required('GAME_SERVER_HMAC_SECRET'),
-    providerApiUrl: process.env.SERVER_PROVIDER_API_URL || '',
-    providerApiKey: process.env.SERVER_PROVIDER_API_KEY || '',
+    hmacSecret: required('GAME_SERVER_HMAC_SECRET'),
+    apiUrl:     required('SERVER_PROVIDER_API_URL'),
+    apiKey:     required('SERVER_PROVIDER_API_KEY'),
   },
   api: {
     port: parseInt(process.env.API_PORT || '3000', 10),
-  },
-  platform: {
-    feePercent: parseFloat(process.env.PLATFORM_FEE_PERCENT || '5'),
   },
 };

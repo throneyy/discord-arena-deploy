@@ -1,17 +1,18 @@
-// ─── Package Metadata ────────────────────────────────────────────────────────
-// Reads name/version from package.json for logging or /health responses.
+// ─── Meta Utility ─────────────────────────────────────────────────────────────────
+// Safely parses metadata stored as either JSON string or plain object.
 
-const path = require('path');
-let _pkg = null;
-
-function getPkg() {
-  if (!_pkg) {
-    _pkg = require(path.join(__dirname, '../../package.json'));
+/**
+ * @param {string|object|null|undefined} metadata
+ * @returns {object}
+ */
+function getMeta(metadata) {
+  if (!metadata) return {};
+  if (typeof metadata === 'object') return metadata;
+  try {
+    return JSON.parse(metadata);
+  } catch (_) {
+    return {};
   }
-  return _pkg;
 }
 
-module.exports = {
-  get name()    { return getPkg().name; },
-  get version() { return getPkg().version; },
-};
+module.exports = { getMeta };

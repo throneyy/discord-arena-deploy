@@ -1,37 +1,43 @@
-// ─── Express API Server ──────────────────────────────────────────────────────
-// Serves the game server callback endpoint.
+// ─── Express API Server ────────────────────────────────────────────────────
+// Listens for game server callbacks (HMAC-authenticated).
 
-const express = require('express');
-const helmet  = require('helmet');
-const config  = require('../config');
-const logger  = require('../utils/logger');
-
-const matchResultRouter = require('./routes/matchResult');
+const express      = require('express');
+const helmet       = require('helmet');
+const config       = require('../config');
+const logger       = require('../utils/logger');
+const matchResult  = require('./routes/matchResult');
 
 function startApiServer() {
   const app = express();
 
-  // ── Security middleware ──
+  // ── Middleware ──
   app.use(helmet());
-  app.use(express.json({ limit: '10kb' }));
+
+  // Parse JSON bodies (raw body needed for HMAC — see verifyHmac.js)
+  app.use(
+    express.json({
+      verify: (req, _res, buf) => {
+        req.rawBody = buf.toString('utf8');
+      },
+    })
+  );
 
   // ── Routes ──
-  app.use('/api', matchResultRouter);
+  app.use('/api', matchResult);
 
   // ── Health check ──
-  app.get('/health', (_req, res) => res.json({ status: 'ok', uptime: process.uptime() }));
-
-  // ── 404 handler ──
-  app.use((_req, res) => res.status(404).json({ error: 'Not found' }));
+  app.get('/health', (_req, res) => res.json({ status: 'ok', ts: Date.now() }));
 
   // ── Error handler ──
   app.use((err, _req, res, _next) => {
-    logger.error('Unhandled API error', { error: err.message });
+    logger.error('Unhandled Express error', { error: err.message });
     res.status(500).json({ error: 'Internal server error' });
   });
 
   const port = config.api.port;
-  app.listen(port, () => logger.info(`Express API listening on :${port}`));
+  app.listen(port, () => {
+    logger.info(`Express API listening on :${port}`);
+  });
 
   return app;
 }

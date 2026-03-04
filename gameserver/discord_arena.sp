@@ -1,11 +1,18 @@
 /**
- * discord_arena.sp — SourceMod plugin for Discord Arena
+ * discord_arena.sp
+ * SourceMod plugin — sends match results to the Discord Arena API.
  *
- * Fires a HMAC-signed POST to the Discord Arena API when a match ends.
  * Requires: sm-ripext (https://github.com/ErikMinekus/sm-ripext)
  *
- * Compile: spcomp discord_arena.sp -o discord_arena.smx
- * Install: addons/sourcemod/plugins/discord_arena.smx
+ * Build:
+ *   spcomp discord_arena.sp -o discord_arena.smx
+ *
+ * Install:
+ *   Place discord_arena.smx in addons/sourcemod/plugins/
+ *   Place discord_arena.cfg in cfg/sourcemod/
+ *
+ * Before each match set the match ID via RCON:
+ *   rcon da_match_id "clxxxxxxxxxxxxxxxxxx"
  */
 
 #include <sourcemod>
@@ -14,135 +21,142 @@
 #pragma semicolon 1
 #pragma newdecls required
 
-// ── ConVars ──
-ConVar g_cvApiUrl;
-ConVar g_cvHmacSecret;
-ConVar g_cvMatchId;
-
-// ── Plugin Info ──
-public Plugin myinfo = {
+// ───────────────────────────────────────────────────────────────────
+PluginInfo g_Plugin =
+{
   name        = "Discord Arena",
-  author      = "Arena",
-  description = "Posts match results to Discord Arena API",
+  author      = "arena-dev",
+  description = "Sends match results to Discord Arena API",
   version     = "1.0.0",
   url         = ""
 };
 
-public void OnPluginStart() {
-  g_cvApiUrl     = CreateConVar("da_api_url",    "",  "Discord Arena API base URL");
-  g_cvHmacSecret = CreateConVar("da_hmac_secret", "", "HMAC-SHA256 shared secret",   FCVAR_PROTECTED);
-  g_cvMatchId    = CreateConVar("da_match_id",   "",  "Current match ID (set via RCON before each match)");
+// ───────────────────────────────────────────────────────────────────
+ConVar g_cvApiUrl;
+ConVar g_cvHmacSecret;
+ConVar g_cvMatchId;
+
+char g_sApiUrl[256];
+char g_sHmacSecret[128];
+char g_sMatchId[64];
+
+// ───────────────────────────────────────────────────────────────────
+public void OnPluginStart()
+{
+  g_cvApiUrl     = CreateConVar("da_api_url",    "",  "Discord Arena API base URL",  FCVAR_PROTECTED);
+  g_cvHmacSecret = CreateConVar("da_hmac_secret","",  "HMAC secret (matches Node.js)", FCVAR_PROTECTED);
+  g_cvMatchId    = CreateConVar("da_match_id",   "",  "Current match ID",             0);
 
   AutoExecConfig(true, "discord_arena");
 
-  HookEvent("cs_win_panel_match", Event_MatchEnd);
-  // For TF2, swap to: HookEvent("teamplay_win_panel", Event_MatchEnd);
+  HookEventEx("cs_win_panel_match", Event_MatchEnd, EventHookMode_PostNoCopy);
+  HookEventEx("tf_game_over",       Event_MatchEnd, EventHookMode_PostNoCopy);
 
-  LogMessage("[DiscordArena] Plugin loaded.");
+  RegAdminCmd("da_test_result", Cmd_TestResult, ADMFLAG_ROOT, "Test: simulate a match result");
 }
 
-// ──────────────────────────────────────────────────────────────────────────────
-// Event_MatchEnd — fired when a CS2 match ends
-// ──────────────────────────────────────────────────────────────────────────────
-public Action Event_MatchEnd(Event event, const char[] name, bool dontBroadcast) {
-  char matchId[128];
-  g_cvMatchId.GetString(matchId, sizeof(matchId));
-
-  if (matchId[0] == '\0') {
-    LogMessage("[DiscordArena] da_match_id not set — skipping result post.");
+// ───────────────────────────────────────────────────────────────────
+public Action Event_MatchEnd(Event event, const char[] name, bool dontBroadcast)
+{
+  g_cvMatchId.GetString(g_sMatchId, sizeof(g_sMatchId));
+  if (strlen(g_sMatchId) == 0) {
+    LogMessage("[DiscordArena] da_match_id is not set — skipping result post");
     return Plugin_Continue;
   }
 
-  // Determine winner by team score
-  int t_score  = event.GetInt("t_score");
-  int ct_score = event.GetInt("ct_score");
+  // Find the winning team (CT=3, T=2 in CS2; use score to compare for TF2)
+  char winnerDiscordId[64];
+  winnerDiscordId[0] = '\0';
 
-  // Find the winning team's MVP (highest score)
-  int winTeam = (ct_score >= t_score) ? CS_TEAM_CT : CS_TEAM_T;
-  int winner  = FindTopScorerOnTeam(winTeam);
-
-  if (winner == -1) {
-    LogMessage("[DiscordArena] Could not determine winner.");
-    return Plugin_Continue;
-  }
-
-  char winnerSteamId[64];
-  GetClientAuthId(winner, AuthId_SteamID64, winnerSteamId, sizeof(winnerSteamId));
-
-  PostMatchResult(matchId, winnerSteamId);
-  return Plugin_Continue;
-}
-
-// ──────────────────────────────────────────────────────────────────────────────
-// FindTopScorerOnTeam — returns client index of highest-score player on team
-// ──────────────────────────────────────────────────────────────────────────────
-int FindTopScorerOnTeam(int team) {
-  int best = -1;
-  int bestScore = -1;
-
+  // Walk all connected clients, find the one whose team won with max score
+  int   bestScore = -1;
   for (int i = 1; i <= MaxClients; i++) {
-    if (!IsClientInGame(i) || IsClientObserver(i)) continue;
-    if (GetClientTeam(i) != team) continue;
+    if (!IsClientConnected(i) || IsClientBot(i)) continue;
 
+    char steamId[64];
+    GetClientAuthId(i, AuthId_Steam2, steamId, sizeof(steamId));
+
+    // Use client frags as a proxy; real integrations would check team score
     int score = GetClientFrags(i);
     if (score > bestScore) {
       bestScore = score;
-      best      = i;
+      // In production store the Discord ID in a client cookie / name prefix
+      GetClientName(i, winnerDiscordId, sizeof(winnerDiscordId));
     }
   }
-  return best;
-}
 
-// ──────────────────────────────────────────────────────────────────────────────
-// PostMatchResult — builds JSON payload, signs with HMAC, POSTs to API
-// ──────────────────────────────────────────────────────────────────────────────
-void PostMatchResult(const char[] matchId, const char[] winnerDiscordId) {
-  char apiUrl[256];
-  char hmacSecret[256];
-  g_cvApiUrl.GetString(apiUrl, sizeof(apiUrl));
-  g_cvHmacSecret.GetString(hmacSecret, sizeof(hmacSecret));
-
-  if (apiUrl[0] == '\0' || hmacSecret[0] == '\0') {
-    LogError("[DiscordArena] da_api_url or da_hmac_secret not configured.");
-    return;
+  if (strlen(winnerDiscordId) == 0) {
+    LogMessage("[DiscordArena] Could not determine winner — skipping");
+    return Plugin_Continue;
   }
 
-  // Build timestamp
-  int timestamp = GetTime() * 1000; // ms epoch
+  SendResult(g_sMatchId, winnerDiscordId);
+  return Plugin_Continue;
+}
+
+// ───────────────────────────────────────────────────────────────────
+public Action Cmd_TestResult(int client, int args)
+{
+  char matchId[64], winnerId[64];
+  GetCmdArg(1, matchId,  sizeof(matchId));
+  GetCmdArg(2, winnerId, sizeof(winnerId));
+
+  if (strlen(matchId) == 0 || strlen(winnerId) == 0) {
+    ReplyToCommand(client, "Usage: da_test_result <matchId> <winnerDiscordId>");
+    return Plugin_Handled;
+  }
+
+  SendResult(matchId, winnerId);
+  ReplyToCommand(client, "[DiscordArena] Test result dispatched.");
+  return Plugin_Handled;
+}
+
+// ───────────────────────────────────────────────────────────────────
+void SendResult(const char[] matchId, const char[] winnerDiscordId)
+{
+  g_cvApiUrl.GetString(g_sApiUrl, sizeof(g_sApiUrl));
+  g_cvHmacSecret.GetString(g_sHmacSecret, sizeof(g_sHmacSecret));
+
+  if (strlen(g_sApiUrl) == 0 || strlen(g_sHmacSecret) == 0) {
+    LogError("[DiscordArena] da_api_url or da_hmac_secret is not configured");
+    return;
+  }
 
   // Build JSON body
+  char ts[32];
+  IntToString(GetTime() * 1000, ts, sizeof(ts));
+
   char body[512];
-  FormatEx(body, sizeof(body),
-    "{\"matchId\":\"%s\",\"winnerDiscordId\":\"%s\",\"timestamp\":%d}",
-    matchId, winnerDiscordId, timestamp
+  Format(body, sizeof(body),
+    "{\"matchId\":\"%s\",\"winnerDiscordId\":\"%s\",\"timestamp\":%s}",
+    matchId, winnerDiscordId, ts
   );
 
-  // Compute HMAC-SHA256 (ripext provides HMAC utilities)
-  char signature[65]; // 32 bytes = 64 hex chars
-  ripext_hmac_sha256(hmacSecret, body, signature, sizeof(signature));
-
-  // POST to API
-  char endpoint[512];
-  FormatEx(endpoint, sizeof(endpoint), "%s/api/match-result", apiUrl);
-
-  HTTPRequest request = new HTTPRequest(endpoint);
-  request.SetHeader("Content-Type",  "application/json");
-  request.SetHeader("x-signature",   signature);
-
-  JSONObject json = JSONObject.FromString(body);
-  request.Post(json, OnMatchResultResponse);
-  delete json;
-
-  LogMessage("[DiscordArena] Posted match result: match=%s winner=%s", matchId, winnerDiscordId);
-}
-
-// ──────────────────────────────────────────────────────────────────────────────
-// OnMatchResultResponse — callback for HTTP POST
-// ──────────────────────────────────────────────────────────────────────────────
-public void OnMatchResultResponse(HTTPResponse response, any value) {
-  if (response.Status != HTTPStatus_OK) {
-    LogError("[DiscordArena] API error: HTTP %d", response.Status);
+  // Compute HMAC-SHA256 signature
+  // sm-ripext provides HMAC via CryptoGenerateHMACSHA256
+  char signature[65]; // 64 hex chars + null
+  if (!CryptoGenerateHMACSHA256(g_sHmacSecret, body, signature, sizeof(signature))) {
+    LogError("[DiscordArena] Failed to compute HMAC");
     return;
   }
-  LogMessage("[DiscordArena] Match result accepted by API.");
+
+  // Build full URL
+  char url[300];
+  Format(url, sizeof(url), "%s/api/match-result", g_sApiUrl);
+
+  // Fire HTTP POST
+  HTTPRequest req = new HTTPRequest(url);
+  req.SetHeader("Content-Type",         "application/json");
+  req.SetHeader("X-Signature-Sha256",   signature);
+  req.POST(body, OnResultResponse, 0);
+}
+
+// ───────────────────────────────────────────────────────────────────
+public void OnResultResponse(HTTPResponse response, any value)
+{
+  if (response.Status != HTTPStatus_OK) {
+    LogError("[DiscordArena] API returned HTTP %d", response.Status);
+    return;
+  }
+  LogMessage("[DiscordArena] Match result posted successfully");
 }
